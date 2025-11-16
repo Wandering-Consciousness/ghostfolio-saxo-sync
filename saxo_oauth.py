@@ -301,8 +301,15 @@ def perform_oauth_flow():
     app_secret = os.getenv('SAXO_APP_SECRET')
     redirect_uri = os.getenv('SAXO_REDIRECT_URI', 'http://localhost:5000/callback')
 
-    auth_endpoint = 'https://sim.logonvalidation.net/authorize'
-    token_endpoint = 'https://sim.logonvalidation.net/token'
+    # Use production endpoints for live accounts, simulation for testing
+    use_production = os.getenv('SAXO_USE_PRODUCTION', 'false').lower() == 'true'
+
+    if use_production:
+        auth_endpoint = 'https://live.logonvalidation.net/authorize'
+        token_endpoint = 'https://live.logonvalidation.net/token'
+    else:
+        auth_endpoint = 'https://sim.logonvalidation.net/authorize'
+        token_endpoint = 'https://sim.logonvalidation.net/token'
 
     if not app_key or not app_secret:
         raise ValueError("SAXO_APP_KEY and SAXO_APP_SECRET must be set in environment")

@@ -4,13 +4,15 @@ Automated synchronization tool that imports trades, positions, and account data 
 
 ## Features
 
-- Automated sync of closed positions (completed trades) from Saxo Bank
+- **Automatic instrument lookup** - Retrieves real stock symbols and ISINs from Saxo API
+- Automated sync of open and closed positions from Saxo Bank
 - OAuth2 authentication with token refresh
 - Account balance synchronization
 - Deduplication to prevent duplicate imports
 - Symbol mapping for better data source matching
 - Docker containerization with cron scheduling
 - Support for multiple operation modes
+- Production and simulation environment support
 
 ## Prerequisites
 
@@ -72,8 +74,8 @@ Before running the container, you need to complete the OAuth flow once to get yo
 # Install dependencies
 pip install -r requirements.txt
 
-# Run OAuth flow
-python saxo_oauth.py
+# Run OAuth authentication
+python get_auth.py
 ```
 
 This will:
@@ -88,25 +90,17 @@ This will:
 You need to find your account key to sync the correct account:
 
 ```bash
-# Run this Python snippet to list your accounts
-python -c "
-from dotenv import load_dotenv
-import os
-from saxo_openapi import API
-from saxo_oauth import perform_oauth_flow
-import saxo_openapi.endpoints.portfolio as pf
-
-load_dotenv()
-oauth = perform_oauth_flow()
-client = API(access_token=oauth.access_token)
-
-r = pf.accounts.AccountsMe()
-accounts = client.request(r)
-
-for account in accounts.get('Data', []):
-    print(f\"Account: {account.get('AccountId')} - Key: {account.get('AccountKey')}\")
-"
+# Run the account discovery script
+python get_account_key.py
 ```
+
+This will display all your Saxo accounts with their:
+- Account ID
+- Account Key
+- Account Type
+- Currency
+- Cash Balance
+- Total Value
 
 Copy the `AccountKey` for your desired account and add it to your `.env` file as `SAXO_ACCOUNT_KEY`.
 
@@ -160,6 +154,7 @@ docker logs -f saxo-sync
 | `SAXO_APP_SECRET` | Yes | Saxo Bank application secret (client_secret) | - |
 | `SAXO_REDIRECT_URI` | Yes | OAuth redirect URI | `http://localhost:5000/callback` |
 | `SAXO_ACCOUNT_KEY` | Yes | Saxo account key to sync | - |
+| `SAXO_USE_PRODUCTION` | No | Use production API (true/false) | `false` |
 | `SAXO_ACCESS_TOKEN` | Auto | OAuth access token (auto-generated) | - |
 | `SAXO_REFRESH_TOKEN` | Auto | OAuth refresh token (auto-generated) | - |
 | `SAXO_TOKEN_EXPIRY` | Auto | Token expiration timestamp (auto-managed) | - |
@@ -194,9 +189,27 @@ Examples for `CRON` variable:
 
 Leave empty for one-time execution.
 
-## Symbol Mapping
+## Instrument Lookup & Symbol Mapping
 
-The sync tool uses `mapping.yaml` to map Saxo symbols to Yahoo Finance tickers for better data matching:
+### Automatic Instrument Lookup
+
+The sync tool automatically retrieves stock symbols and ISINs from Saxo Bank's API using the instrument's UIC (Universal Instrument Code). This happens transparently for all positions:
+
+```
+Position UIC 19756014 → API Lookup → QUBT (Quantum Computing Inc)
+Position UIC 25225740 → API Lookup → IONQ (IonQ Inc.)
+```
+
+The lookup process:
+1. Extracts UIC and AssetType from position data
+2. Queries Saxo's `/ref/v1/instruments/details` endpoint
+3. Retrieves Symbol, ISIN, Description, and Currency
+4. Caches results to minimize API calls
+5. Strips exchange suffixes (e.g., `QUBT:xnas` → `QUBT`) for Yahoo Finance compatibility
+
+### Manual Symbol Mapping (Optional)
+
+For instruments where automatic lookup fails or you need custom mappings, use `mapping.yaml`:
 
 ```yaml
 symbol_mapping:
@@ -205,7 +218,7 @@ symbol_mapping:
   V80A: VNGA80.MI   # Vanguard 80/20 (Milan)
 ```
 
-Add your instruments to this file as needed.
+Symbol priority: **ISIN** > **Manual Mapping** > **Auto-lookup Symbol** > **Fallback to SAXO{uic}**
 
 ## How It Works
 
@@ -219,11 +232,12 @@ Add your instruments to this file as needed.
 ### Sync Process
 
 1. **Initialize**: Authenticate with Saxo Bank and Ghostfolio
-2. **Fetch Data**: Retrieve closed positions and account balances from Saxo
-3. **Transform**: Convert Saxo data to Ghostfolio format
-4. **Deduplicate**: Check for existing activities using position IDs
-5. **Import**: Send new activities to Ghostfolio in chunks
-6. **Update Balance**: Sync cash balance to Ghostfolio account
+2. **Fetch Positions**: Retrieve open positions (or closed positions if available) from Saxo
+3. **Lookup Instruments**: Query Saxo API for symbol/ISIN details for each position
+4. **Transform**: Convert Saxo data to Ghostfolio format with proper symbols
+5. **Deduplicate**: Check for existing activities using position IDs
+6. **Import**: Send new activities to Ghostfolio in chunks
+7. **Update Balance**: Sync cash balance to Ghostfolio account
 
 ### Data Mapping
 
@@ -367,7 +381,9 @@ OPERATION=SYNCSAXO python main.py
 
 - `GET /port/v1/accounts` - Account details
 - `GET /port/v1/balances` - Cash balances
-- `GET /port/v1/closedpositions` - Completed trades
+- `GET /port/v1/positions/me` - Open positions
+- `GET /port/v1/closedpositions/me` - Closed positions (if netting mode allows)
+- `GET /ref/v1/instruments/details` - Instrument lookup by UIC
 - `POST /token` - OAuth token endpoint
 
 ### Ghostfolio API
@@ -388,10 +404,11 @@ OPERATION=SYNCSAXO python main.py
 
 ## Limitations
 
-- Only syncs **closed positions** (completed trades)
-- Open positions are not synced
+- Syncs **open positions** from accounts with End of Day netting mode
+- Closed positions synced when account uses Intraday netting mode
 - Corporate actions may need manual adjustment
-- Symbol mapping required for instruments without ISIN
+- Instrument lookup requires valid UIC and AssetType
+- Some instruments may not have ISINs in Saxo's database
 - Saxo simulation account has limited data
 
 ## Contributing
@@ -422,7 +439,18 @@ MIT License - see LICENSE file for details
 
 ## Changelog
 
-### v1.0.0 (2024-01-XX)
+### v1.1.0 (2025-11-16)
+
+- **NEW**: Automatic instrument lookup via Saxo API by UIC
+- **NEW**: Support for open positions (End of Day netting accounts)
+- **NEW**: Helper scripts: `get_auth.py` and `get_account_key.py`
+- **NEW**: Production/simulation environment selection
+- Fixed account balance update (added required `id` field)
+- Fixed symbol validation (strip exchange suffixes for Yahoo Finance)
+- Fixed mapping.yaml parsing issue
+- Improved error logging with response details
+
+### v1.0.0 (2024-XX-XX)
 
 - Initial release
 - OAuth2 authentication with auto-refresh

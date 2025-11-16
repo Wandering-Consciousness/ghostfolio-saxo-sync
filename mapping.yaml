@@ -2,7 +2,7 @@
 # Maps Saxo symbols to Yahoo Finance tickers or other data sources
 # Format: SAXO_SYMBOL: YAHOO_TICKER
 
-symbol_mapping:
+symbol_mapping: {}
   # Example mappings - add your specific instruments
   # VUAA: VUAA.L
   # CSPX: CSPX.L
