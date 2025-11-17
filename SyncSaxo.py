@@ -188,10 +188,14 @@ class SyncSaxo:
                 return details
             else:
                 logger.warning(f"No instrument data found for UIC {uic}")
+                # Cache the failure to prevent duplicate lookups
+                self.instrument_cache[cache_key] = None
                 return None
 
         except Exception as e:
             logger.error(f"Failed to lookup instrument {uic}: {e}")
+            # Cache the failure to prevent duplicate lookups
+            self.instrument_cache[cache_key] = None
             return None
 
     def get_saxo_positions(self) -> List[Dict]:
