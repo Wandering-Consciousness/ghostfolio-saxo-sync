@@ -193,7 +193,7 @@ class SyncSaxo:
                 return None
 
         except Exception as e:
-            logger.error(f"Failed to lookup instrument {uic}: {e}")
+            logger.warning(f"Failed to lookup instrument {uic}: {e}")
             # Cache the failure to prevent duplicate lookups
             self.instrument_cache[cache_key] = None
             return None
