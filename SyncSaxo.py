@@ -13,6 +13,7 @@ import requests
 import yaml
 from saxo_openapi import API
 import saxo_openapi.endpoints.portfolio as pf
+import saxo_openapi.endpoints.accounthistory.historicalpositions as ah_hist
 import saxo_openapi.endpoints.referencedata.instruments as rd_instruments
 
 from saxo_oauth import SaxoOAuth
@@ -32,6 +33,7 @@ class SyncSaxo:
         self.ghost_saxo_platform = ghost_saxo_platform
 
         self.account_id = None
+        self.client_key = None  # Saxo ClientKey for historical positions
         self.saxo_client = None
         self.ghost_token = None
         self.symbol_mapping = self.load_symbol_mapping()
@@ -95,6 +97,9 @@ class SyncSaxo:
             # Get account details
             r = pf.accounts.AccountDetails(AccountKey=self.saxo_account_key)
             account_data = self.saxo_client.request(r)
+
+            # Store ClientKey for historical positions API
+            self.client_key = account_data.get('ClientKey')
 
             logger.info(f"Account info retrieved: {account_data.get('AccountId', 'Unknown')}")
             return account_data
@@ -190,153 +195,153 @@ class SyncSaxo:
             return None
 
     def get_saxo_positions(self) -> List[Dict]:
-        """Retrieve current open positions from Saxo"""
+        """Retrieve historical positions from Saxo (works for all netting modes)"""
         try:
-            logger.info("Fetching positions...")
+            logger.info("Fetching historical positions...")
 
-            # Try closed positions first (if IntraDay netting)
-            try:
-                r = pf.closedpositions.ClosedPositionsMe()
-                response = self.saxo_client.request(r)
-                closed_positions = response.get('Data', [])
-                logger.info(f"Found {len(closed_positions)} closed positions")
-                return closed_positions
-            except Exception as e:
-                logger.info(f"Closed positions not available (EndOfDay netting): {e}")
+            if not self.client_key:
+                logger.error("ClientKey not available - cannot fetch historical positions")
+                return []
 
-            # Fall back to current open positions
-            logger.info("Fetching current open positions instead...")
-            r = pf.positions.PositionsMe()
+            # Fetch positions from the last 5 years to ensure we get everything
+            # This works for both IntraDay and EndOfDay netting modes
+            from_date = (datetime.now() - timedelta(days=365*5)).strftime('%Y-%m-%d')
+            to_date = datetime.now().strftime('%Y-%m-%d')
+
+            params = {
+                'FromDate': from_date,
+                'ToDate': to_date
+            }
+
+            r = ah_hist.HistoricalPositions(ClientKey=self.client_key, params=params)
             response = self.saxo_client.request(r)
 
             positions = response.get('Data', [])
-            logger.info(f"Found {len(positions)} open positions")
+            logger.info(f"Found {len(positions)} historical positions (from {from_date} to {to_date})")
 
             return positions
 
         except Exception as e:
-            logger.error(f"Failed to get positions: {e}")
+            logger.error(f"Failed to get historical positions: {e}")
             return []
 
-    def transform_saxo_position_to_activity(self, position: Dict) -> Dict:
+    def transform_saxo_position_to_activity(self, position: Dict) -> List[Dict]:
         """
-        Transform a Saxo position to Ghostfolio activity format
-        Handles both open positions (PositionBase) and closed positions (DisplayAndFormat)
+        Transform a Saxo historical position to Ghostfolio activity format.
+        Returns a list of activities (typically BUY + SELL for closed positions).
         """
         try:
-            # Check if this is an open position or closed position
-            position_base = position.get('PositionBase')
-            if position_base:
-                # Open position structure
-                uic = position_base.get('Uic')
-                asset_type = position_base.get('AssetType', 'Stock')
-                position_id = position.get('PositionId', '')
-                amount = abs(float(position_base.get('Amount', 0)))
-                price = float(position_base.get('OpenPrice', 0))
+            activities = []
 
-                # Dates - use execution time
-                exec_time = position_base.get('ExecutionTimeOpen')
-                if exec_time:
-                    date = datetime.fromisoformat(exec_time.replace('Z', '+00:00'))
-                else:
-                    date = datetime.now()
+            # Historical position structure
+            uic = position.get('Uic')
+            asset_type = position.get('OpeningAssetType', 'Stock')
+            symbol = position.get('InstrumentSymbol', '')
+            amount = abs(float(position.get('Amount', 0)))
 
-                # For open positions, Amount > 0 = BUY (long position)
-                activity_type = 'BUY'
+            # Determine if Long or Short
+            long_short = position.get('LongShort', {}).get('Value', 'Long')
+            is_long = long_short == 'Long'
 
-                # Calculate fees from costs
-                price_with_costs = float(position_base.get('OpenPriceIncludingCosts', price))
-                cost = abs((price_with_costs - price) * amount)
+            # Get prices
+            price_open = float(position.get('PriceOpen', 0))
+            price_close = float(position.get('PriceClose', 0))
 
-                # Lookup instrument details to get symbol and ISIN
-                symbol = None
-                isin = None
-                currency = self.ghost_currency  # Default currency
-                instrument_details = self.get_instrument_details(uic, asset_type)
-                if instrument_details:
-                    symbol = instrument_details.get('Symbol')
-                    isin = instrument_details.get('Isin')
-                    # Use instrument currency if available
-                    instrument_currency = instrument_details.get('Currency')
-                    if instrument_currency:
-                        currency = instrument_currency
+            # Dates
+            exec_time_open = position.get('ExecutionTimeOpen')
+            exec_time_close = position.get('ExecutionTimeClose')
 
-            else:
-                # Closed position structure
-                symbol = position.get('DisplayAndFormat', {}).get('Symbol', '')
-                isin = position.get('DisplayAndFormat', {}).get('Isin', '')
-                uic = position.get('Uic')
+            # Generate a unique position identifier
+            position_id = f"{uic}_{exec_time_open}_{exec_time_close}"
 
-                # Determine buy/sell
-                buy_sell = position.get('BuySell', 'Buy')
-                activity_type = 'BUY' if buy_sell == 'Buy' else 'SELL'
-
-                # Dates - use closing date
-                close_time = position.get('CloseTime')
-                if close_time:
-                    date = datetime.fromisoformat(close_time.replace('Z', '+00:00'))
-                else:
-                    date = datetime.now()
-
-                # Amounts
-                amount = abs(float(position.get('Amount', 0)))
-                price = float(position.get('ClosingPrice', 0))
-
-                # Position ID for deduplication
-                position_id = position.get('PositionId', '')
-
-                # Cost/fees
-                cost = abs(float(position.get('Cost', 0)))
-
-                # Currency - use account currency as default
-                currency = self.ghost_currency
+            # Lookup instrument details to get proper symbol and ISIN
+            isin = None
+            currency = self.ghost_currency
+            instrument_details = self.get_instrument_details(uic, asset_type)
+            if instrument_details:
+                symbol = instrument_details.get('Symbol') or symbol
+                isin = instrument_details.get('Isin')
+                instrument_currency = instrument_details.get('Currency')
+                if instrument_currency:
+                    currency = instrument_currency
 
             # Determine final symbol and data source
-            # Priority: ISIN > mapped symbol > raw symbol > fallback to UIC
             final_symbol = None
-            data_source = 'YAHOO'  # Default to YAHOO
+            data_source = 'YAHOO'
 
             if isin:
-                # ISINs work with YAHOO data source
                 final_symbol = isin
                 data_source = 'YAHOO'
             elif symbol:
-                # Check if symbol has a mapping
-                mapped_symbol = self.symbol_mapping.get(symbol, symbol)
+                # Strip exchange suffix if present (e.g., "QUBT:xnas" -> "QUBT")
+                clean_symbol = symbol.split(':')[0] if ':' in symbol else symbol
+
+                # Check if it's a numeric symbol (likely Japanese or other Asian exchange)
+                if clean_symbol.isdigit():
+                    # For Japanese stocks, add .T suffix
+                    # You can expand this logic for other exchanges if needed
+                    clean_symbol = f"{clean_symbol}.T"
+
+                mapped_symbol = self.symbol_mapping.get(clean_symbol, clean_symbol)
                 final_symbol = mapped_symbol
                 data_source = 'YAHOO'
             else:
-                # No symbol or ISIN - use UIC as fallback with MANUAL
                 final_symbol = f"SAXO{uic}"
                 data_source = 'MANUAL'
                 logger.warning(f"No symbol/ISIN found for UIC {uic}, using placeholder: {final_symbol}")
 
-            # Build comment with available info
+            # Calculate fees (profit/loss can help estimate, but we don't have direct fee data)
+            # For now, set fee to 0 as historical positions don't provide cost breakdown
+            fee = 0
+
+            # Build comment
             comment_parts = [f'saxoPositionId={position_id}', f'UIC={uic}']
             if symbol and symbol != final_symbol:
                 comment_parts.append(f'SaxoSymbol={symbol}')
+            comment = ' | '.join(comment_parts)
 
-            activity = {
-                'accountId': self.account_id,
-                'symbol': final_symbol,
-                'dataSource': data_source,
-                'type': activity_type,
-                'date': date.isoformat(),
-                'quantity': amount,
-                'unitPrice': price,
-                'fee': cost,
-                'currency': currency,
-                'comment': ' | '.join(comment_parts),
-            }
+            # Create OPEN activity (BUY for long, SELL for short)
+            if exec_time_open:
+                open_date = datetime.fromisoformat(exec_time_open.replace('Z', '+00:00'))
+                open_activity = {
+                    'accountId': self.account_id,
+                    'symbol': final_symbol,
+                    'dataSource': data_source,
+                    'type': 'BUY' if is_long else 'SELL',
+                    'date': open_date.isoformat(),
+                    'quantity': amount,
+                    'unitPrice': price_open,
+                    'fee': fee,
+                    'currency': currency,
+                    'comment': f'{comment} | OPEN',
+                }
+                activities.append(open_activity)
+                logger.debug(f"Created OPEN activity: {open_activity['type']} {amount} {final_symbol} @ {price_open}")
 
-            logger.debug(f"Transformed position {position_id}: {activity_type} {amount} {final_symbol} @ {price}")
+            # Create CLOSE activity (SELL for long, BUY for short)
+            if exec_time_close:
+                close_date = datetime.fromisoformat(exec_time_close.replace('Z', '+00:00'))
+                close_activity = {
+                    'accountId': self.account_id,
+                    'symbol': final_symbol,
+                    'dataSource': data_source,
+                    'type': 'SELL' if is_long else 'BUY',
+                    'date': close_date.isoformat(),
+                    'quantity': amount,
+                    'unitPrice': price_close,
+                    'fee': fee,
+                    'currency': currency,
+                    'comment': f'{comment} | CLOSE',
+                }
+                activities.append(close_activity)
+                logger.debug(f"Created CLOSE activity: {close_activity['type']} {amount} {final_symbol} @ {price_close}")
 
-            return activity
+            return activities
 
         except Exception as e:
             logger.error(f"Failed to transform position: {e}")
             logger.error(f"Position data: {position}")
-            return None
+            return []
 
     def is_duplicate_activity(self, activity: Dict, existing_activities: List[Dict]) -> bool:
         """
@@ -622,12 +627,13 @@ class SyncSaxo:
                 # Transform to Ghostfolio format
                 new_activities = []
                 for position in positions:
-                    activity = self.transform_saxo_position_to_activity(position)
-                    if activity:
-                        if not self.is_duplicate_activity(activity, existing_activities):
-                            new_activities.append(activity)
-                        else:
-                            logger.debug(f"Skipping duplicate activity")
+                    activities = self.transform_saxo_position_to_activity(position)
+                    if activities:
+                        for activity in activities:
+                            if not self.is_duplicate_activity(activity, existing_activities):
+                                new_activities.append(activity)
+                            else:
+                                logger.debug(f"Skipping duplicate activity")
 
                 logger.info(f"Found {len(new_activities)} new activities to import")
 
