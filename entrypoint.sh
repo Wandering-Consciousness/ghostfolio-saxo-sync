@@ -7,6 +7,9 @@ set -e
 echo "Saxo Bank to Ghostfolio Sync Container"
 echo "======================================"
 
+# Disable interactive authentication in Docker (prevents port binding attempts)
+export DISABLE_INTERACTIVE_AUTH=${DISABLE_INTERACTIVE_AUTH:-true}
+
 # Check if CRON environment variable is set
 if [ -z "$CRON" ]; then
   echo "CRON not set - running one-time sync now"

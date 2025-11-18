@@ -300,6 +300,7 @@ def perform_oauth_flow():
     app_key = os.getenv('SAXO_APP_KEY')
     app_secret = os.getenv('SAXO_APP_SECRET')
     redirect_uri = os.getenv('SAXO_REDIRECT_URI', 'http://localhost:5000/callback')
+    disable_interactive = os.getenv('DISABLE_INTERACTIVE_AUTH', 'false').lower() == 'true'
 
     # Use production endpoints for live accounts, simulation for testing
     use_production = os.getenv('SAXO_USE_PRODUCTION', 'false').lower() == 'true'
@@ -326,6 +327,14 @@ def perform_oauth_flow():
         except Exception as e:
             logger.warning(f"Failed to use existing tokens: {e}")
             logger.info("Will perform new authorization flow")
+
+    # Check if interactive mode is disabled (for automated/server environments)
+    if disable_interactive:
+        raise RuntimeError(
+            "No valid OAuth tokens found and interactive authentication is disabled.\n"
+            "Please run 'python get_auth.py' locally to obtain tokens first, then ensure\n"
+            "SAXO_ACCESS_TOKEN, SAXO_REFRESH_TOKEN, and SAXO_TOKEN_EXPIRY are set in your environment."
+        )
 
     # Perform new authorization
     port = int(urlparse(redirect_uri).port or 5000)
