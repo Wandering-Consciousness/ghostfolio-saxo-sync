@@ -160,7 +160,7 @@ class SaxoOAuth:
                 logger.error(f"Response: {e.response.text}")
             raise
 
-    def refresh_access_token(self):
+    def refresh_access_token(self, save_to_cache=True):
         """
         Refresh the access token using the refresh token
         """
@@ -189,6 +189,7 @@ class SaxoOAuth:
 
             token_data = response.json()
             self.access_token = token_data['access_token']
+            # Saxo returns a new refresh token on each refresh
             self.refresh_token = token_data.get('refresh_token', self.refresh_token)
 
             # Calculate expiry time
@@ -197,6 +198,10 @@ class SaxoOAuth:
 
             logger.info("Access token refreshed successfully")
             logger.info(f"New token expires at: {self.token_expiry}")
+
+            # Save refreshed tokens to cache for next run
+            if save_to_cache:
+                self.save_tokens_to_cache()
 
             return {
                 'access_token': self.access_token,
@@ -292,6 +297,53 @@ class SaxoOAuth:
         except Exception as e:
             logger.error(f"Failed to save tokens to file: {e}")
 
+    def save_tokens_to_cache(self, cache_file='.saxo_token_cache.json'):
+        """
+        Save tokens to a JSON cache file for persistence across runs
+        """
+        try:
+            cache_data = {
+                'access_token': self.access_token,
+                'refresh_token': self.refresh_token,
+                'token_expiry': self.token_expiry.isoformat() if self.token_expiry else None
+            }
+
+            with open(cache_file, 'w') as f:
+                json.dump(cache_data, f)
+
+            logger.info(f"Tokens cached to {cache_file}")
+
+        except Exception as e:
+            logger.error(f"Failed to save tokens to cache: {e}")
+
+    def load_tokens_from_cache(self, cache_file='.saxo_token_cache.json'):
+        """
+        Load tokens from JSON cache file
+        """
+        try:
+            if not os.path.exists(cache_file):
+                return False
+
+            with open(cache_file, 'r') as f:
+                cache_data = json.load(f)
+
+            self.access_token = cache_data.get('access_token')
+            self.refresh_token = cache_data.get('refresh_token')
+
+            expiry_str = cache_data.get('token_expiry')
+            if expiry_str:
+                self.token_expiry = datetime.fromisoformat(expiry_str)
+
+            if self.access_token and self.refresh_token:
+                logger.info("Loaded tokens from cache file")
+                return True
+
+            return False
+
+        except Exception as e:
+            logger.warning(f"Failed to load tokens from cache: {e}")
+            return False
+
 
 def perform_oauth_flow():
     """
@@ -317,12 +369,22 @@ def perform_oauth_flow():
 
     oauth = SaxoOAuth(app_key, app_secret, redirect_uri, auth_endpoint, token_endpoint)
 
-    # Try to load existing tokens
-    if oauth.load_tokens_from_env():
+    # Priority 1: Try to load from cache file (contains refreshed tokens from previous runs)
+    tokens_loaded = oauth.load_tokens_from_cache()
+
+    # Priority 2: Fall back to environment variables if cache doesn't exist
+    if not tokens_loaded:
+        tokens_loaded = oauth.load_tokens_from_env()
+
+    # If we have tokens, try to use them (refresh if needed)
+    if tokens_loaded:
         try:
             # Try to refresh if expired
             if oauth.is_token_expired():
                 oauth.refresh_access_token()
+            else:
+                # Even if not expired, save current tokens to cache for consistency
+                oauth.save_tokens_to_cache()
             return oauth
         except Exception as e:
             logger.warning(f"Failed to use existing tokens: {e}")
@@ -341,6 +403,7 @@ def perform_oauth_flow():
     code = oauth.get_authorization_code_interactive(port)
     oauth.exchange_code_for_token(code)
     oauth.save_tokens_to_file()
+    oauth.save_tokens_to_cache()
 
     return oauth
 

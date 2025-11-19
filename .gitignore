@@ -1,6 +1,9 @@
 # Environment variables
 .env
 
+# Token cache
+.saxo_token_cache.json
+
 # Python
 __pycache__/
 *.py[cod]
